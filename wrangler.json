@@ -1,0 +1,6 @@
+{
+  "name": "noticias-moc",
+  "main": "index.js",
+  "compatibility_date": "2025-09-10",
+  "compatibility_flags": ["nodejs_compat"]
+}

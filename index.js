@@ -1,4 +1,4 @@
-// 🇲🇿 WORKER DE NOTÍCIAS DE MOÇAMBIQUE — VERSÃO ATUALIZADA (TESTADA EM 2025)
+// 🇲🇿 WORKER DE NOTÍCIAS DE MOÇAMBIQUE — VERSÃO FINAL (COM PROXY + LOGS)
 
 export default {
   async fetch(request) {
@@ -23,21 +23,20 @@ export default {
 };
 
 async function handleNoticias() {
-  // 👇 FONTES ATUALIZADAS + HEADERS DE NAVEGADOR
+  // 👇 FONTES COM PROXY PÚBLICO — CONTORNA BLOQUEIOS
   const fontes = [
     {
       nome: "@Verdade",
-      url: "https://www.verdade.co.mz/feed/",
+      url: "https://api.allorigins.win/raw?url=https://www.verdade.co.mz/feed/",
       categoria: "Geral",
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
       }
     },
     {
       nome: "Canal de Moçambique",
-      url: "https://canaldemocambique.co.mz/feed/",
+      url: "https://api.allorigins.win/raw?url=https://canaldemocambique.co.mz/feed/",
       categoria: "Política",
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Safari/605.1.15',
@@ -46,7 +45,7 @@ async function handleNoticias() {
     },
     {
       nome: "DW África",
-      url: "https://rss.dw.com/xml/DW_Africa_Portuguese",
+      url: "https://api.allorigins.win/raw?url=https://rss.dw.com/xml/DW_Africa_Portuguese",
       categoria: "Internacional",
       headers: {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
@@ -58,28 +57,36 @@ async function handleNoticias() {
 
   for (const fonte of fontes) {
     try {
-      console.log(`[INFO] Buscando notícias de: ${fonte.nome}`);
+      console.log(`[🔄] Buscando: ${fonte.nome}`);
       const response = await fetch(fonte.url, { headers: fonte.headers });
 
       if (!response.ok) {
-        console.log(`[ERRO] ${fonte.nome} retornou status: ${response.status}`);
+        console.log(`[❌] ${fonte.nome} falhou com status: ${response.status}`);
         continue;
       }
 
-      const xml = await response.text();
-      console.log(`[XML] Primeiros 200 caracteres de ${fonte.nome}:`, xml.substring(0, 200));
+      const text = await response.text();
+      console.log(`[📄] Tamanho da resposta de ${fonte.nome}: ${text.length} caracteres`);
 
-      const noticias = parseRSS(xml, fonte.nome, fonte.categoria);
-      console.log(`[SUCESSO] ${fonte.nome}: encontrou ${noticias.length} notícias`);
+      // Verifica se veio HTML de erro (ex: Cloudflare block)
+      if (text.includes("<title>Access denied")) {
+        console.log(`[🛡️] ${fonte.nome} bloqueou acesso — tentando fallback...`);
+        continue;
+      }
+
+      const noticias = parseRSS(text, fonte.nome, fonte.categoria);
+      console.log(`[✅] ${fonte.nome}: encontrou ${noticias.length} notícias`);
 
       todasNoticias = [...todasNoticias, ...noticias];
     } catch (error) {
-      console.log(`[ERRO] Falha ao buscar ${fonte.nome}:`, error.message);
+      console.log(`[💥] Erro fatal em ${fonte.nome}:`, error.message);
     }
   }
 
   // Ordena por data — mais recente primeiro
   todasNoticias.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+
+  console.log(`[🏁] Total de notícias coletadas: ${todasNoticias.length}`);
 
   return new Response(JSON.stringify(todasNoticias.slice(0, 50)), {
     headers: {
@@ -89,14 +96,31 @@ async function handleNoticias() {
   });
 }
 
-function parseRSS(xml, fonte, categoria) {
+function parseRSS(text, fonte, categoria) {
+  // Tenta extrair XML mesmo se vier dentro de HTML
+  let xml = text;
+
+  // Se for HTML, tenta extrair o conteúdo do <body>
+  if (text.includes("<html") || text.includes("<!DOCTYPE")) {
+    const bodyMatch = text.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    if (bodyMatch && bodyMatch[1]) {
+      xml = bodyMatch[1];
+    }
+  }
+
   const parser = new DOMParser();
   const doc = parser.parseFromString(xml, "application/xml");
 
   // Verifica erro de parsing
   const parserError = doc.querySelector("parsererror");
   if (parserError) {
-    console.log(`[ERRO XML] ${fonte}:`, parserError.textContent);
+    console.log(`[XMLLoader Error] ${fonte}:`, parserError.textContent.substring(0, 200));
+    return [];
+  }
+
+  const rss = doc.querySelector("rss");
+  if (!rss) {
+    console.log(`[XMLLoader] Nenhum <rss> encontrado em ${fonte}`);
     return [];
   }
 
@@ -104,8 +128,9 @@ function parseRSS(xml, fonte, categoria) {
   const noticias = [];
 
   items.forEach(item => {
-    const titulo = item.querySelector("title")?.textContent || "";
-    const link = item.querySelector("link")?.textContent || item.querySelector("guid")?.textContent || "";
+    const titulo = item.querySelector("title")?.textContent?.trim() || "";
+    const link = item.querySelector("link")?.textContent?.trim() || 
+                 item.querySelector("guid")?.textContent?.trim() || "";
     const descricao = item.querySelector("description")?.textContent || "";
     const pubDate = item.querySelector("pubDate")?.textContent || new Date().toISOString();
     const imagem = extrairImagem(descricao) || extrairImagemFromEnclosure(item) || "";
@@ -130,7 +155,7 @@ function parseRSS(xml, fonte, categoria) {
   return noticias;
 }
 
-// Funções auxiliares (mantidas iguais)
+// Funções auxiliares
 function extrairImagem(html) {
   const imgMatch = html.match(/<img[^>]+src="([^">]+)"/);
   return imgMatch ? imgMatch[1] : "";
@@ -161,5 +186,5 @@ function extrairVideoFromEnclosure(item) {
 }
 
 function limparHTML(html) {
-  return html.replace(/<[^>]*>?/gm, '');
+  return html.replace(/<[^>]*>?/gm, '').replace(/\s+/g, ' ').trim();
 }
